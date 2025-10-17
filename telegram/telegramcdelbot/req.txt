@@ -1,0 +1,14 @@
+# Telegram Bot Framework
+python-telegram-bot
+
+# For scheduling the 12-hour tasks
+APScheduler==3.10.4
+
+# For loading variables from your .env file
+python-dotenv==1.0.1
+
+fastapi[standard]
+uvicorn[standard]
+streamlit
+python-crontab
+pytz
