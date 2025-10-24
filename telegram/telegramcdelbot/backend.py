@@ -21,6 +21,7 @@ from telegram.helpers import escape_markdown
 import os
 from dotenv import load_dotenv 
 import logging
+from telegram.error import RetryAfter, TimedOut, TelegramError
 
 load_dotenv()  # ← add this line BEFORE using os.getenv("BOT_TOKEN")
 # ✅ Allow your frontend domain to access this API
@@ -46,24 +47,12 @@ application = Application.builder().token(os.getenv("BOT_TOKEN")).connection_poo
 bot = application.bot
 GROUP_LOOKUP = {}
 # This global variable will hold the running bot process object
-"""ACTIVE_BOTS = {}
-"""
+
 # --- Pydantic Models for Request Bodies --- 
 class WebhookRequest(BaseModel):
     # The public URL of your PHP script, e.g., "https://senti.royalpepperbanquets.in/webhook/"
     url: str
 
-"""class BotControlRequest(BaseModel):
-    group_id: Optional[int] = None
-    group_ids: Optional[List[int]] = None
-
-    @model_validator(mode='after')
-    def check_exclusive_fields(self):
-        if self.group_id is not None and self.group_ids is not None:
-            raise ValueError('Provide either "group_id" or "group_ids", not both.')
-        if self.group_id is None and self.group_ids is None:
-            raise ValueError('You must provide either "group_id" or "group_ids".')
-        return self"""
 
 class GroupMapping(BaseModel):
     main_group_name: str
@@ -96,17 +85,6 @@ class ScheduleRequest(BaseModel):
             raise ValueError('When enabling a schedule, "time_ist" and "group_id" are required.')
         return self
 
-"""def is_process_running(pid: int):
-    ""Checks if a process with the given PID is currently running.""
-    if pid is None:
-        return False
-    try:
-        # Sending signal 0 to a process checks for its existence without harming it
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    else:
-        return True"""
 
 async def custom_forward_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -124,50 +102,64 @@ async def custom_forward_handler(update: Update, context: ContextTypes.DEFAULT_T
     logging.info(f"Processing message {message.message_id} from '{sender_name}'.")
 
     for group_id in [lesser_group_id, archive_group_id]:
-        try:
-            if message.text and not (message.photo or message.document or message.video or message.audio or message.voice or message.sticker or message.animation):
-                content = escape_markdown(message.text, version=2)
-                await bot.send_message(chat_id=group_id, text=header + content, parse_mode='MarkdownV2')
-            else:
-                caption_with_header = header + escape_markdown(message.caption or "", version=2)
-                if message.photo:
-                    await bot.send_photo(chat_id=group_id, photo=message.photo[-1].file_id, caption=caption_with_header, parse_mode='MarkdownV2')
-                elif message.document:
-                    await bot.send_document(chat_id=group_id, document=message.document.file_id, caption=caption_with_header, parse_mode='MarkdownV2')
-                elif message.video:
-                    await bot.send_video(chat_id=group_id, video=message.video.file_id, caption=caption_with_header, parse_mode='MarkdownV2')
-                elif message.audio:
-                    await bot.send_audio(chat_id=group_id, audio=message.audio.file_id, caption=caption_with_header, parse_mode='MarkdownV2')
-                elif message.voice:
-                    await bot.send_voice(chat_id=group_id, voice=message.voice.file_id, caption=caption_with_header, parse_mode='MarkdownV2')
-                elif message.sticker:
-                    await bot.send_message(chat_id=group_id, text=header, parse_mode='MarkdownV2')
-                    await bot.send_sticker(chat_id=group_id, sticker=message.sticker.file_id)
-                elif message.animation:
-                    await bot.send_animation(chat_id=group_id, animation=message.animation.file_id, caption=caption_with_header, parse_mode='MarkdownV2')
+        MAX_RETRIES = 5
+        for attempt in range(1, MAX_RETRIES + 1):    
+            try:
+                if message.text and not (message.photo or message.document or message.video or message.audio or message.voice or message.sticker or message.animation):
+                    content = escape_markdown(message.text, version=2)
+                    await bot.send_message(chat_id=group_id, text=header + content, parse_mode='MarkdownV2')
+                else:
+                    caption_with_header = header + escape_markdown(message.caption or "", version=2)
+                    if message.photo:
+                        await bot.send_photo(chat_id=group_id, photo=message.photo[-1].file_id, caption=caption_with_header, parse_mode='MarkdownV2')
+                    elif message.document:
+                        await bot.send_document(chat_id=group_id, document=message.document.file_id, caption=caption_with_header, parse_mode='MarkdownV2')
+                    elif message.video:
+                        await bot.send_video(chat_id=group_id, video=message.video.file_id, caption=caption_with_header, parse_mode='MarkdownV2')
+                    elif message.audio:
+                        await bot.send_audio(chat_id=group_id, audio=message.audio.file_id, caption=caption_with_header, parse_mode='MarkdownV2')
+                    elif message.voice:
+                        await bot.send_voice(chat_id=group_id, voice=message.voice.file_id, caption=caption_with_header, parse_mode='MarkdownV2')
+                    elif message.sticker:
+                        await bot.send_message(chat_id=group_id, text=header, parse_mode='MarkdownV2')
+                        await bot.send_sticker(chat_id=group_id, sticker=message.sticker.file_id)
+                    elif message.animation:
+                        await bot.send_animation(chat_id=group_id, animation=message.animation.file_id, caption=caption_with_header, parse_mode='MarkdownV2')
+                
+                logging.info(f"Successfully sent message to Group {group_id} after {attempt} attempt(s).")
+                break
+            except RetryAfter as e:
+                # 1. Flood Control: Respect Telegram's requested delay
+                delay = e.retry_after or 5 
+                logging.warning(f"Group {group_id} hit flood limit. Retrying in {delay}s (Attempt {attempt}/{MAX_RETRIES}).")
+                if attempt == MAX_RETRIES:
+                    logging.error(f"Message dropped: Max retries reached for Flood Control on Group {group_id}.")
+                    break # Give up
+                await asyncio.sleep(delay)
+                # Loop will continue to the next attempt
 
-            logging.info(f"Successfully sent message to Group {group_id}.")
-        except Exception as e:
-            logging.error(f"Failed to send message to Group {group_id}. Error: {e}")
+            except TimedOut:
+                # 2. Network Timeout: Use exponential backoff (1s, 3s, 7s, 15s...)
+                # The '2 ** (attempt-1)' starts at 1, 2, 4, 8...
+                delay = 2 ** (attempt - 1) + 1 
+                logging.warning(f"Group {group_id} timed out. Retrying in {delay}s (Attempt {attempt}/{MAX_RETRIES}).")
+                if attempt == MAX_RETRIES:
+                    logging.error(f"Message dropped: Max retries reached for Timeout on Group {group_id}.")
+                    break # Give up
+                await asyncio.sleep(delay)
+                # Loop will continue to the next attempt
+                
+            except TelegramError as e:
+                # 3. All other Telegram errors (e.g., Bad Request, Bot Kicked) - These are NOT recoverable
+                logging.error(f"Failed to send message to Group {group_id}. Unrecoverable Telegram Error: {e}")
+                break # Give up immediately
+
+            except Exception as e:
+                # 4. Catch unexpected system/network exceptions outside Telegram's API
+                logging.error(f"Failed to send message to Group {group_id}. Unexpected System Error: {e}")
+                break 
 
 # --- API Endpoints ---
-"""@app.post("/bot/start", summary="Start the bot for a specific group")
-async def start_bot(request: BotControlRequest):
-    group_id = request.group_id
-    if is_process_running(ACTIVE_BOTS.get(group_id)):
-        raise HTTPException(status_code=400, detail=f"Bot is already running for group {group_id}.")
-
-    try:
-        process = subprocess.Popen([sys.executable, 'forwarder.py', str(group_id)])
-        await asyncio.sleep(0.5)
-        if process.poll() is not None:
-            raise HTTPException(status_code=500, detail=f"Bot for group {group_id} failed to start. Check its logs.")
-        pid = process.pid
-        db_manager.set_bot_status(group_id, pid)
-        ACTIVE_BOTS[group_id] = pid
-        return {"status": "success", "message": f"Bot started for group {group_id}.", "pid": pid}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start bot: {e}")"""
 
 @app.post("/bot/set_webhook", summary="Set the bot's webhook URL with Telegram")
 async def set_webhook(request: WebhookRequest):
@@ -182,84 +174,7 @@ async def set_webhook(request: WebhookRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to set webhook: {e}")
 
-"""@app.post("/bot/start", summary="Start bot for one or more groups")
-async def start_bot(request: BotControlRequest):
-    ids_to_start = request.group_ids if request.group_ids is not None else [request.group_id]
 
-    started_bots = []
-    failed_bots = []
-
-    for group_id in ids_to_start:
-        if is_process_running(ACTIVE_BOTS.get(group_id)):
-            failed_bots.append({"group_id": group_id, "reason": "Already running."})
-            continue
-        try:
-            process = subprocess.Popen([sys.executable, 'forwarder.py', str(group_id)])
-            await asyncio.sleep(0.5) # Give the process a moment to start
-            if process.poll() is not None:
-                failed_bots.append({"group_id": group_id, "reason": "Failed to start. Check logs."})
-            else:
-                pid = process.pid
-                db_manager.set_bot_status(group_id, pid)
-                ACTIVE_BOTS[group_id] = pid
-                started_bots.append({"group_id": group_id, "pid": pid})
-        except Exception as e:
-            failed_bots.append({"group_id": group_id, "reason": str(e)})
-
-    return {
-        "status": "completed",
-        "message": f"Attempted to start {len(ids_to_start)} bot(s).",
-        "started": started_bots,
-        "failed": failed_bots
-    }"""
-
-"""@app.post("/bot/stop", summary="Stop the bot for a specific group")
-async def stop_bot(request: BotControlRequest):
-    group_id = request.group_id
-    pid = ACTIVE_BOTS.get(group_id)
-    if not is_process_running(pid):
-        raise HTTPException(status_code=400, detail=f"Bot is not running for group {group_id}.")
-
-    try:
-        try:
-            os.kill(pid, signal.SIGINT)
-        except OSError:
-            print(f"Process {pid} was already gone before stop was called.")
-        db_manager.clear_bot_status(group_id)
-        ACTIVE_BOTS.pop(group_id, None)
-        return {"status": "success", "message": f"Bot stopped for group {group_id}."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to stop bot: {e}")"""
-        
-"""@app.post("/bot/stop", summary="Stop bot for one or more groups")
-async def stop_bot(request: BotControlRequest):
-    ids_to_stop = request.group_ids if request.group_ids is not None else [request.group_id]
-
-    stopped_bots = []
-    failed_bots = []
-
-    for group_id in ids_to_stop:
-        pid = ACTIVE_BOTS.get(group_id)
-        if not is_process_running(pid):
-            failed_bots.append({"group_id": group_id, "reason": "Not running."})
-            continue
-        try:
-            try:
-                os.kill(pid, signal.SIGINT)
-            except OSError:
-                print(f"Process {pid} was already gone before stop was called.")
-            db_manager.clear_bot_status(group_id)
-            ACTIVE_BOTS.pop(group_id, None)
-            stopped_bots.append({"group_id": group_id, "pid": pid})
-        except Exception as e:
-            failed_bots.append({"group_id": group_id, "reason": str(e)})
-
-    return {
-        "status": "completed",
-        "message": f"Attempted to stop {len(ids_to_stop)} bot(s).",
-        "stopped": stopped_bots,
-        "failed": failed_bots
-    }"""
 
 @app.post("/schedule/purge", summary="Set or update the daily auto-del schedule")
 async def schedule_purge(request: ScheduleRequest):
@@ -313,22 +228,6 @@ async def get_schedule():
     return {"enabled": False, "message": "No active schedule found."}
     
     
-"""@app.get("/bot/status", summary="Check status for all monitored groups")
-async def get_status():
-    all_main_groups = db_manager.get_groups_by_tag('A')
-    status_list = []
-    for group in all_main_groups:
-        group_id = group['group_id']
-        pid = ACTIVE_BOTS.get(group_id)
-        is_running = is_process_running(pid)
-
-        status_list.append({
-            "group_name": group['group_name'],
-            "group_id": group_id,
-            "status": "running" if is_running else "stopped",
-            "pid": pid if is_running else None
-        })
-    return status_list"""
 
 @app.get("/groups", summary="List group mappings, optionally filtered by tag")
 async def list_groups(tag: Optional[str] = Query(None, enum=["A", "B", "C"])):
@@ -448,23 +347,6 @@ async def telegram_webhook(request: Request):
 
         # Immediately tell Telegram "we got it"
         return {"status": "ok"}
-
-        """# Extract message info if available
-        message = update.get("message") or update.get("edited_message") or {}
-        chat_id = message.get("chat", {}).get("id")
-        text = message.get("text", "")
-
-        # Example simple command handling
-        if text == "/start":
-            reply = "👋 Hello! Telegram webhook is working!"
-        else:
-            reply = f"You said: {text}"
-
-        # Send reply asynchronously
-        if chat_id:
-            asyncio.create_task(send_message(chat_id, reply))
-
-        return JSONResponse({"status": "ok"})"""
 
     except Exception as e:
         print("❌ Error in webhook:", e)
