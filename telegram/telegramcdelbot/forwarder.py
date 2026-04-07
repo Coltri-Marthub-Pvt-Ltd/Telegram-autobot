@@ -7,7 +7,8 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 from telegram.helpers import escape_markdown
 import db_manager
 import requests  # Added for webhook setup
-
+from datetime import timezone, datetime
+from zoneinfo import ZoneInfo  # Python 3.9+
 # --- Basic Setup ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -28,7 +29,9 @@ async def custom_forward_handler(update: Update, context: ContextTypes.DEFAULT_T
     archive_group_id = destinations['archive']
 
     sender_name = escape_markdown(message.from_user.full_name, version=2)
-    timestamp = message.date.strftime("%Y-%m-%d %H:%M:%S %Z")
+    utc_time = message.date.replace(tzinfo=timezone.utc)
+    ist_time = utc_time.astimezone(ZoneInfo("Asia/Kolkata"))
+    timestamp = ist_time.strftime("%Y-%m-%d %H:%M:%S IST")
     header = f"*Original Sender:* `{sender_name}`\n*Time Sent:* `{timestamp}`\n\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\n\n"
 
     logging.info(f"Processing message {message.message_id} from '{sender_name}'.")
